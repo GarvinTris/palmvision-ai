@@ -7,6 +7,7 @@ const GUEST_OK = cfg.ALLOW_GUEST !== false;   // simpan tanpa login (anonymous s
 const sb = configured ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY) : null;
 
 const $ = id => document.getElementById(id);
+const on = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); else console.warn(`[PalmVision] elemen #${id} tidak ada di index.html`); };
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 let meta = null;          // isi model_meta.json
@@ -20,34 +21,63 @@ const prettyName = n => n.replace(/_/g, ' ');
 
 /* ------------------------------ MODEL ------------------------------ */
 
+async function fetchWithProgress(url, onProgress) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} belum dipasang (HTTP ${r.status})`);
+  const total = Number(r.headers.get('content-length')) || 0;
+  if (!r.body) return new Uint8Array(await r.arrayBuffer());
+  const reader = r.body.getReader(), chunks = []; let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); got += value.length; onProgress(got, total);
+  }
+  const out = new Uint8Array(got); let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+
 async function loadModel() {
-  const status = $('modelStatus');
+  const status = $('modelStatus'), t0 = performance.now();
+  const setS = (t, warn = false) => { status.textContent = t; status.classList.toggle('warn', warn); };
   try {
-    const m = await fetch('model/model_meta.json', { cache: 'no-cache' });
-    if (!m.ok) throw new Error('model_meta.json tidak ditemukan');
-    meta = await m.json();
+    setS('Memuat model… 0%');
+    // meta dan model diunduh BERSAMAAN (sebelumnya berurutan)
+    const metaP = fetch('model/model_meta.json', { cache: 'no-cache' }).then(r => {
+      if (!r.ok) throw new Error('model_meta.json tidak ditemukan'); return r.json();
+    });
+    const bytesP = fetchWithProgress('model/best.onnx', (got, total) => {
+      const mb = (got / 1048576).toFixed(1);
+      setS(total ? `Mengunduh model… ${Math.min(99, Math.round(100 * got / total))}% (${mb} MB)` : `Mengunduh model… ${mb} MB`);
+    });
+    bytesP.catch(() => {});                       // cegah peringatan jika meta gagal lebih dulu
+    meta = await metaP;
     renderModelInfo();
-    if (user) loadHistory();   // grafik butuh daftar kelas dari meta
+    if (user) loadHistory();                      // grafik butuh daftar kelas dari meta
 
     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
-    const r = await fetch('model/best.onnx');
-    if (!r.ok) throw new Error('model/best.onnx belum dipasang');
-    session = await ort.InferenceSession.create(await r.arrayBuffer(), {
-      executionProviders: ['wasm'], graphOptimizationLevel: 'all',
-    });
+    const bytes = await bytesP;
+    const tDl = performance.now();
+    setS('Menyiapkan model…');
+    session = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+    const tReady = performance.now();
+    console.info(`[PalmVision] unduh ${((tDl - t0) / 1000).toFixed(1)} dtk, siapkan ${((tReady - tDl) / 1000).toFixed(1)} dtk`);
+
     const placeholder = String(meta.version).startsWith('placeholder');
     const preview = meta.preset === 'preview';
-    status.textContent = placeholder ? 'Model contoh (belum dilatih)'
+    setS(placeholder ? 'Model contoh (belum dilatih)'
       : preview ? 'Model preview · akurasi rendah, jangan dipakai untuk keputusan'
-      : `Model aktif · ${meta.version}`;
-    status.classList.toggle('warn', placeholder || preview);
+      : `Model aktif · ${meta.version}`, placeholder || preview);
     $('detectBtn').disabled = !$('imageInput').files.length;
-    $('cameraBtn').disabled = false;
+    if ($('cameraBtn')) $('cameraBtn').disabled = false;
     if ($('imageInput').files.length && !current) analyzeFile($('imageInput').files[0]);
+
+    // pemanasan: jalankan sekali dengan gambar kosong agar deteksi pertama tidak lambat
+    const size = meta.imgsz, dummy = new ort.Tensor('float32', new Float32Array(3 * size * size).fill(0.45), [1, 3, size, size]);
+    inferChain = inferChain.then(() => session.run({ [session.inputNames[0]]: dummy })).catch(() => {});
   } catch (e) {
     console.error(e);
-    status.textContent = `Model tidak siap: ${e.message}`;
-    status.classList.add('warn');
+    setS(`Model tidak siap: ${e.message}`, true);
   }
 }
 
@@ -395,26 +425,26 @@ async function analyzeFile(f) {
   finally { $('detectBtn').disabled = false; }
 }
 
-$('imageInput').addEventListener('change', () => {
+on('imageInput', 'change', () => {
   const f = $('imageInput').files[0];
   $('fileName').textContent = f ? f.name : 'Belum ada file dipilih';
   $('detectBtn').disabled = !f || !session;
   analyzeFile(f);                      // otomatis begitu gambar dipilih
 });
-$('detectBtn').addEventListener('click', () => analyzeFile($('imageInput').files[0]));
+on('detectBtn', 'click', () => analyzeFile($('imageInput').files[0]));
 
-$('cameraBtn').addEventListener('click', startCamera);
-$('camShot').addEventListener('click', captureFrame);
-$('camSwitch').addEventListener('click', () => { camFacing = camFacing === 'environment' ? 'user' : 'environment'; startCamera(); });
-$('camClose').addEventListener('click', () => $('cameraDialog').close());
-$('cameraDialog').addEventListener('close', stopCamera);
+on('cameraBtn', 'click', startCamera);
+on('camShot', 'click', captureFrame);
+on('camSwitch', 'click', () => { camFacing = camFacing === 'environment' ? 'user' : 'environment'; startCamera(); });
+on('camClose', 'click', () => $('cameraDialog').close());
+on('cameraDialog', 'close', stopCamera);
 
-$('saveBtn').addEventListener('click', saveInspection);
-$('authBtn').addEventListener('click', async () => { if (user && !user.is_anonymous) await sb.auth.signOut(); else openAuth(); });
-$('signInBtn').addEventListener('click', () => authAction('in'));
-$('signUpBtn').addEventListener('click', () => authAction('up'));
-$('closeAuth').addEventListener('click', () => $('authDialog').close());
-$('authForm').addEventListener('submit', e => { e.preventDefault(); authAction('in'); });
+on('saveBtn', 'click', saveInspection);
+on('authBtn', 'click', async () => { if (user && !user.is_anonymous) await sb.auth.signOut(); else openAuth(); });
+on('signInBtn', 'click', () => authAction('in'));
+on('signUpBtn', 'click', () => authAction('up'));
+on('closeAuth', 'click', () => $('authDialog').close());
+on('authForm', 'submit', e => { e.preventDefault(); authAction('in'); });
 
 if (!configured) $('configBanner').classList.remove('hidden');
 if (sb) {
