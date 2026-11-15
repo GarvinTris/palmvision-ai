@@ -3,6 +3,7 @@ import { letterboxGeometry, decode, classify } from './yolo.js';
 const cfg = window.PALM_CONFIG || {};
 const BUCKET = cfg.STORAGE_BUCKET || 'inspections';
 const configured = !!(cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY && !cfg.SUPABASE_URL.includes('YOUR-'));
+const GUEST_OK = cfg.ALLOW_GUEST !== false;   // simpan tanpa login (anonymous sign-in Supabase)
 const sb = configured ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY) : null;
 
 const $ = id => document.getElementById(id);
@@ -35,9 +36,14 @@ async function loadModel() {
       executionProviders: ['wasm'], graphOptimizationLevel: 'all',
     });
     const placeholder = String(meta.version).startsWith('placeholder');
-    status.textContent = placeholder ? 'Model contoh (belum dilatih)' : `Model aktif · ${meta.version}`;
-    status.classList.toggle('warn', placeholder);
+    const preview = meta.preset === 'preview';
+    status.textContent = placeholder ? 'Model contoh (belum dilatih)'
+      : preview ? 'Model preview · akurasi rendah, jangan dipakai untuk keputusan'
+      : `Model aktif · ${meta.version}`;
+    status.classList.toggle('warn', placeholder || preview);
     $('detectBtn').disabled = !$('imageInput').files.length;
+    $('cameraBtn').disabled = false;
+    if ($('imageInput').files.length && !current) analyzeFile($('imageInput').files[0]);
   } catch (e) {
     console.error(e);
     status.textContent = `Model tidak siap: ${e.message}`;
@@ -63,25 +69,36 @@ function renderModelInfo() {
     <p class="small">Akurasi di foto baru bisa lebih rendah: buah tertutup pelepah, cahaya, dan sudut kamera sangat berpengaruh. Selalu verifikasi manual sebelum keputusan panen.</p>`;
 }
 
-function preprocess(bmp, size) {
-  const g = letterboxGeometry(bmp.width, bmp.height, size);
-  const c = document.createElement('canvas'); c.width = c.height = size;
-  const ctx = c.getContext('2d', { willReadFrequently: true });
-  ctx.fillStyle = 'rgb(114,114,114)'; ctx.fillRect(0, 0, size, size);
-  ctx.drawImage(bmp, g.px, g.py, g.nw, g.nh);
-  const d = ctx.getImageData(0, 0, size, size).data, n = size * size, t = new Float32Array(3 * n);
+const preCanvas = document.createElement('canvas');
+let preCtx = null;
+function preprocess(src, w, h, size) {
+  const g = letterboxGeometry(w, h, size);
+  if (preCanvas.width !== size) { preCanvas.width = preCanvas.height = size; preCtx = null; }
+  preCtx ??= preCanvas.getContext('2d', { willReadFrequently: true });
+  preCtx.fillStyle = 'rgb(114,114,114)'; preCtx.fillRect(0, 0, size, size);
+  preCtx.drawImage(src, g.px, g.py, g.nw, g.nh);
+  const d = preCtx.getImageData(0, 0, size, size).data, n = size * size, t = new Float32Array(3 * n);
   for (let i = 0; i < n; i++) { t[i] = d[4 * i] / 255; t[n + i] = d[4 * i + 1] / 255; t[2 * n + i] = d[4 * i + 2] / 255; }
   return { tensor: new ort.Tensor('float32', t, [1, 3, size, size]), geo: g };
 }
 
+// Semua inferensi lewat satu antrian: session.run tidak boleh dipanggil bersamaan.
+let inferChain = Promise.resolve();
+function inferSource(src, w, h) {
+  const job = inferChain.then(async () => {
+    const { tensor, geo } = preprocess(src, w, h, meta.imgsz);
+    const out = await session.run({ [session.inputNames[0]]: tensor });
+    const o = out[session.outputNames[0]];
+    const boxes = decode(o.data, o.dims, geo, w, h, meta.classes.length);
+    return classify(boxes, meta).map(d => ({ ...d, finalClass: d.className, rejected: false }));
+  });
+  inferChain = job.catch(() => {});
+  return job;
+}
+
 async function runDetection(file) {
   const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
-  const { tensor, geo } = preprocess(bmp, meta.imgsz);
-  const out = await session.run({ [session.inputNames[0]]: tensor });
-  const o = out[session.outputNames[0]];
-  const boxes = decode(o.data, o.dims, geo, bmp.width, bmp.height, meta.classes.length);
-  const dets = classify(boxes, meta).map(d => ({ ...d, finalClass: d.className, rejected: false }));
-  return { bmp, dets };
+  return { bmp, dets: await inferSource(bmp, bmp.width, bmp.height) };
 }
 
 /* ------------------------------ UI HASIL ------------------------------ */
@@ -134,6 +151,78 @@ function renderResult() {
   drawResult();
 }
 
+/* ------------------------------ KAMERA LIVE ------------------------------ */
+
+let camStream = null, camActive = false, camFacing = 'environment';
+
+function stopStream() { camStream?.getTracks().forEach(t => t.stop()); camStream = null; }
+function stopCamera() { camActive = false; stopStream(); $('camVideo').srcObject = null; }
+
+async function startCamera() {
+  if (!session) return setMsg('Model belum siap.', true);
+  if (!navigator.mediaDevices?.getUserMedia) return setMsg('Kamera butuh HTTPS (atau localhost) dan browser yang mendukung.', true);
+  try {
+    stopStream();
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: camFacing }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false,
+    });
+  } catch (e) {
+    return setMsg(e.name === 'NotAllowedError' ? 'Izin kamera ditolak. Izinkan kamera di pengaturan browser.' : `Kamera gagal: ${e.message}`, true);
+  }
+  const v = $('camVideo'); v.srcObject = camStream; await v.play().catch(() => {});
+  if (!$('cameraDialog').open) $('cameraDialog').showModal();
+  if (!camActive) { camActive = true; camLoop(); }
+}
+
+function drawLive(ov, v, dets) {
+  ov.width = v.videoWidth; ov.height = v.videoHeight;
+  const ctx = ov.getContext('2d'); ctx.clearRect(0, 0, ov.width, ov.height);
+  const lw = Math.max(2, ov.width / 300), fs = Math.max(13, ov.width / 45);
+  ctx.font = `600 ${fs}px sans-serif`; ctx.textBaseline = 'top';
+  for (const d of dets) {
+    const x = d.x1 * ov.width, y = d.y1 * ov.height, w = (d.x2 - d.x1) * ov.width, h = (d.y2 - d.y1) * ov.height;
+    const col = classColor(d.className);
+    ctx.lineWidth = lw; ctx.strokeStyle = col; ctx.setLineDash(d.needsReview ? [lw * 3, lw * 2] : []);
+    ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
+    const label = `${prettyName(d.className)} ${Math.round(d.score * 100)}%`;
+    const tw = ctx.measureText(label).width + 8, ty = Math.max(0, y - fs - 6);
+    ctx.fillStyle = col; ctx.fillRect(x, ty, tw, fs + 6); ctx.fillStyle = '#fff'; ctx.fillText(label, x + 4, ty + 3);
+  }
+}
+
+async function camLoop() {
+  const v = $('camVideo'), ov = $('camOverlay'); let last = performance.now(), fps = 0;
+  while (camActive) {
+    if (v.readyState >= 2 && v.videoWidth) {
+      try {
+        const dets = await inferSource(v, v.videoWidth, v.videoHeight);
+        if (!camActive) break;
+        drawLive(ov, v, dets);
+        const now = performance.now(); fps = fps ? 0.8 * fps + 0.2 * (1000 / (now - last)) : 1000 / (now - last); last = now;
+        const counts = {}; dets.forEach(d => counts[d.className] = (counts[d.className] || 0) + 1);
+        const txt = Object.entries(counts).map(([k, n]) => `${prettyName(k)}: ${n}`).join(' · ') || 'Tidak ada tandan terdeteksi';
+        $('camInfo').textContent = `${txt}  ·  ${fps.toFixed(1)} fps`;
+      } catch (e) { console.error(e); $('camInfo').textContent = `Deteksi gagal: ${e.message}`; camActive = false; break; }
+    }
+    await new Promise(r => requestAnimationFrame(r));
+  }
+}
+
+async function captureFrame() {
+  const v = $('camVideo'); if (!v.videoWidth) return;
+  const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  const bmp = await createImageBitmap(c);
+  stopCamera(); $('cameraDialog').close();
+  setMsg('Menganalisis foto…');
+  try {
+    current = { bmp, dets: await inferSource(bmp, bmp.width, bmp.height) };
+    $('result').classList.remove('hidden'); renderResult();
+    $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setMsg('Foto diambil dan dianalisis. Periksa hasilnya sebelum menyimpan.');
+  } catch (e) { console.error(e); setMsg(`Deteksi gagal: ${e.message}`, true); }
+}
+
 /* ------------------------------ SIMPAN ------------------------------ */
 
 function toJpegBlob(bmp, maxSide = 1600, q = 0.85) {
@@ -145,7 +234,17 @@ function toJpegBlob(bmp, maxSide = 1600, q = 0.85) {
 
 async function saveInspection() {
   if (!sb) return setMsg('Supabase belum dikonfigurasi (config.js).', true);
-  if (!user) { openAuth(); return; }
+  if (!user) {
+    if (!GUEST_OK) { openAuth(); return; }
+    setMsg('Menyimpan sebagai tamu…');
+    const g = await sb.auth.signInAnonymously();
+    if (g.error || !g.data?.user) {
+      console.error(g.error);
+      setMsg('Mode tamu belum aktif di Supabase. Masuk dengan akun untuk menyimpan.', true);
+      openAuth(); return;
+    }
+    user = g.data.user;
+  }
   const btn = $('saveBtn'); btn.disabled = true; setMsg('Menyimpan…');
   let path = null, inspectionId = null;
   try {
@@ -274,21 +373,17 @@ async function authAction(kind) {
 
 function applyUser(u) {
   user = u;
-  $('userLabel').textContent = u ? u.email : 'Belum masuk';
-  $('authBtn').textContent = u ? 'Keluar' : 'Masuk / Daftar';
+  const guest = !!u?.is_anonymous;
+  $('userLabel').textContent = !u ? 'Belum masuk' : guest ? 'Tamu (tanpa akun)' : u.email;
+  $('authBtn').textContent = u && !guest ? 'Keluar' : 'Masuk / Daftar';
   loadHistory();
 }
 
 /* ------------------------------ INIT ------------------------------ */
 
-$('imageInput').addEventListener('change', () => {
-  const f = $('imageInput').files[0];
-  $('fileName').textContent = f ? f.name : 'Belum ada file dipilih';
-  $('detectBtn').disabled = !f || !session;
-});
-
-$('detectBtn').addEventListener('click', async () => {
-  const f = $('imageInput').files[0]; if (!f || !session) return;
+async function analyzeFile(f) {
+  if (!f) return;
+  if (!session) return setMsg('Model masih dimuat. Tunggu sebentar; analisis jalan otomatis setelah siap.', false);
   if (f.size > 20 * 1024 * 1024) return setMsg('Ukuran gambar maksimal 20 MB.', true);
   $('detectBtn').disabled = true; $('result').classList.add('hidden'); setMsg('Menjalankan deteksi…');
   try {
@@ -298,10 +393,24 @@ $('detectBtn').addEventListener('click', async () => {
     setMsg(`Selesai dalam ${((performance.now() - t0) / 1000).toFixed(1)} dtk. Periksa hasilnya sebelum menyimpan.`);
   } catch (e) { console.error(e); setMsg(`Deteksi gagal: ${e.message}`, true); }
   finally { $('detectBtn').disabled = false; }
+}
+
+$('imageInput').addEventListener('change', () => {
+  const f = $('imageInput').files[0];
+  $('fileName').textContent = f ? f.name : 'Belum ada file dipilih';
+  $('detectBtn').disabled = !f || !session;
+  analyzeFile(f);                      // otomatis begitu gambar dipilih
 });
+$('detectBtn').addEventListener('click', () => analyzeFile($('imageInput').files[0]));
+
+$('cameraBtn').addEventListener('click', startCamera);
+$('camShot').addEventListener('click', captureFrame);
+$('camSwitch').addEventListener('click', () => { camFacing = camFacing === 'environment' ? 'user' : 'environment'; startCamera(); });
+$('camClose').addEventListener('click', () => $('cameraDialog').close());
+$('cameraDialog').addEventListener('close', stopCamera);
 
 $('saveBtn').addEventListener('click', saveInspection);
-$('authBtn').addEventListener('click', async () => { if (user) await sb.auth.signOut(); else openAuth(); });
+$('authBtn').addEventListener('click', async () => { if (user && !user.is_anonymous) await sb.auth.signOut(); else openAuth(); });
 $('signInBtn').addEventListener('click', () => authAction('in'));
 $('signUpBtn').addEventListener('click', () => authAction('up'));
 $('closeAuth').addEventListener('click', () => $('authDialog').close());
