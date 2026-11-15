@@ -3,8 +3,10 @@ import { letterboxGeometry, decode, classify } from './yolo.js';
 const cfg = window.PALM_CONFIG || {};
 const BUCKET = cfg.STORAGE_BUCKET || 'inspections';
 const configured = !!(cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY && !cfg.SUPABASE_URL.includes('YOUR-'));
-const GUEST_OK = cfg.ALLOW_GUEST !== false;   // simpan tanpa login (anonymous sign-in Supabase)
-const sb = configured ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY) : null;
+// Tanpa login: semua akses memakai role "anon" Supabase (diatur lewat RLS di supabase/schema.sql).
+const sb = configured
+  ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } })
+  : null;
 
 const $ = id => document.getElementById(id);
 const on = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); else console.warn(`[PalmVision] elemen #${id} tidak ada di index.html`); };
@@ -12,7 +14,6 @@ const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 
 let meta = null;          // isi model_meta.json
 let session = null;       // sesi ONNX Runtime
-let user = null;          // pengguna Supabase
 let current = null;       // { bmp, dets:[{...,finalClass,rejected}] }
 let chart = null;
 
@@ -53,7 +54,7 @@ async function loadModel() {
     bytesP.catch(() => {});                       // cegah peringatan jika meta gagal lebih dulu
     meta = await metaP;
     renderModelInfo();
-    if (user) loadHistory();                      // grafik butuh daftar kelas dari meta
+    loadHistory();                                // grafik butuh daftar kelas dari meta
 
     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
     const bytes = await bytesP;
@@ -329,23 +330,13 @@ function toJpegBlob(bmp, maxSide = 1600, q = 0.85) {
 
 async function saveInspection() {
   if (!sb) return setMsg('Supabase belum dikonfigurasi (config.js).', true);
-  if (!user) {
-    if (!GUEST_OK) { openAuth(); return; }
-    setMsg('Menyimpan sebagai tamu…');
-    const g = await sb.auth.signInAnonymously();
-    if (g.error || !g.data?.user) {
-      console.error(g.error);
-      setMsg('Mode tamu belum diaktifkan di Supabase (Anonymous sign-ins). Masuk dengan akun untuk menyimpan.', true);
-      openAuth(); return;
-    }
-    user = g.data.user;
-  }
+  if (!current) return setMsg('Belum ada hasil deteksi untuk disimpan.', true);
   const btn = $('saveBtn'); btn.disabled = true; setMsg('Menyimpan…');
   let path = null, inspectionId = null;
   try {
     const { bmp, dets } = current;
     const blob = await toJpegBlob(bmp);
-    path = `${user.id}/${crypto.randomUUID()}.jpg`;
+    path = `riwayat/${crypto.randomUUID()}.jpg`;
     let r = await sb.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg', upsert: false });
     if (r.error) throw r.error;
 
@@ -372,23 +363,35 @@ async function saveInspection() {
       const dr = await sb.from('detections').insert(rows);
       if (dr.error) throw dr.error;
     }
-    setMsg('Tersimpan ✔');
+    const chk = await sb.from('inspections').select('id', { count: 'exact', head: true }).eq('id', inspectionId);
+    if (chk.error || !chk.count) throw new Error('Data terkirim tetapi tidak terbaca kembali (cek izin SELECT / schema.sql).');
+    setMsg('Tersimpan ke Supabase ✔ (tabel inspections & detections)');
     await loadHistory();
   } catch (e) {
     console.error(e);
     // rollback agar tidak ada data setengah jadi
     if (inspectionId) await sb.from('inspections').delete().eq('id', inspectionId);
     if (path) await sb.storage.from(BUCKET).remove([path]);
-    setMsg(`Gagal menyimpan: ${e.message || e}`, true);
+    setMsg(saveErrorText(e), true);
   } finally { btn.disabled = false; }
+}
+
+function saveErrorText(e) {
+  const m = String(e?.message || e);
+  if (/row-level security|violates|permission denied|not authorized/i.test(m))
+    return 'Ditolak database (izin akses). Jalankan ulang supabase/schema.sql di Supabase SQL Editor, lalu coba lagi.';
+  if (/bucket not found/i.test(m)) return 'Bucket "inspections" belum ada. Jalankan supabase/schema.sql di Supabase SQL Editor.';
+  if (/relation .* does not exist|schema cache/i.test(m)) return 'Tabel belum dibuat. Jalankan supabase/schema.sql di Supabase SQL Editor.';
+  if (/failed to fetch|networkerror/i.test(m)) return 'Tidak bisa terhubung ke Supabase. Periksa koneksi internet.';
+  return `Gagal menyimpan: ${m}`;
 }
 
 /* ------------------------------ RIWAYAT ------------------------------ */
 
 async function loadHistory() {
   const body = $('historyBody');
-  if (!sb || !user) {
-    body.innerHTML = `<tr><td colspan="7">${sb ? 'Masuk untuk melihat riwayat.' : 'Supabase belum dikonfigurasi.'}</td></tr>`;
+  if (!sb) {
+    body.innerHTML = `<tr><td colspan="7">Supabase belum dikonfigurasi.</td></tr>`;
     ['totalChecks', 'totalBunches', 'ripeShare', 'acceptRate'].forEach(id => $(id).textContent = '–');
     $('acceptNote').textContent = '';
     if (chart) { chart.destroy(); chart = null; }
@@ -450,41 +453,9 @@ async function loadFeedback() {
   $('acceptNote').textContent = total < 50 ? ` n=${total} (masih sedikit)` : ` n=${total}`;
 }
 
-/* ------------------------------ AUTH ------------------------------ */
+/* ------------------------------ PESAN ------------------------------ */
 
 function setMsg(t, err = false) { const m = $('message'); m.textContent = t; m.classList.toggle('error', err); }
-function openAuth() { if (!sb) return setMsg('Supabase belum dikonfigurasi (config.js).', true); $('authMsg').textContent = ''; $('authDialog').showModal(); }
-
-function authErrorText(e) {
-  const m = String(e?.message || e);
-  if (/not confirmed/i.test(m)) return 'Email belum dikonfirmasi. Konfirmasi lewat email, atau minta pengelola mengonfirmasi akunmu.';
-  if (/invalid login credentials/i.test(m)) return 'Email atau kata sandi salah (atau akun belum dikonfirmasi).';
-  if (/rate limit/i.test(m)) return 'Terlalu banyak email terkirim. Tunggu beberapa saat lalu coba lagi.';
-  if (/not authorized/i.test(m)) return 'Email ini belum diizinkan oleh layanan email bawaan Supabase. Minta pengelola mengonfirmasi akun secara manual.';
-  return m;
-}
-
-async function authAction(kind) {
-  const email = $('authEmail').value.trim(), password = $('authPass').value, m = $('authMsg');
-  m.classList.remove('error'); m.textContent = 'Memproses…';
-  const { data, error } = kind === 'in'
-    ? await sb.auth.signInWithPassword({ email, password })
-    : await sb.auth.signUp({ email, password });
-  if (error) { m.classList.add('error'); m.textContent = authErrorText(error); return; }
-  if (kind === 'up' && !data.session) {
-    m.textContent = 'Akun dibuat, tetapi harus dikonfirmasi lewat email. Cek Inbox dan Spam. Email bisa tidak sampai bila layanan email Supabase belum diatur; hubungi pengelola untuk konfirmasi manual.';
-    return;
-  }
-  $('authDialog').close();
-}
-
-function applyUser(u) {
-  user = u;
-  const guest = !!u?.is_anonymous;
-  $('userLabel').textContent = !u ? 'Belum masuk' : guest ? 'Tamu (tanpa akun)' : u.email;
-  $('authBtn').textContent = u && !guest ? 'Keluar' : 'Masuk / Daftar';
-  loadHistory();
-}
 
 /* ------------------------------ INIT ------------------------------ */
 
@@ -517,15 +488,11 @@ on('camClose', 'click', () => $('cameraDialog').close());
 on('cameraDialog', 'close', stopCamera);
 
 on('saveBtn', 'click', saveInspection);
-on('authBtn', 'click', async () => { if (user && !user.is_anonymous) await sb.auth.signOut(); else openAuth(); });
-on('signInBtn', 'click', () => authAction('in'));
-on('signUpBtn', 'click', () => authAction('up'));
-on('closeAuth', 'click', () => $('authDialog').close());
-on('authForm', 'submit', e => { e.preventDefault(); authAction('in'); });
 
 if (!configured) $('configBanner').classList.remove('hidden');
-if (sb) {
-  sb.auth.getSession().then(({ data }) => applyUser(data.session?.user ?? null));
-  sb.auth.onAuthStateChange((_e, s) => applyUser(s?.user ?? null));
-} else { loadHistory(); }
+loadHistory();
+if (sb) sb.from('inspections').select('id', { count: 'exact', head: true }).then(r => {
+  if (r.error) { console.error('[PalmVision] Supabase:', r.error); setMsg(`Supabase error: ${r.error.message}. ${saveErrorText(r.error)}`, true); }
+  else console.info(`[PalmVision] Supabase tersambung. Baris di inspections: ${r.count}`);
+});
 loadModel();

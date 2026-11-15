@@ -1,15 +1,16 @@
--- PalmVision AI — skema Supabase
+-- PalmVision AI — skema Supabase (TANPA LOGIN)
 -- Jalankan sekali di: Supabase Dashboard → SQL Editor → New query → Run.
--- Aman dijalankan ulang (idempotent).
+-- Aman dijalankan ulang (idempotent) dan aman untuk database yang SUDAH berisi data versi lama
+-- (versi lama mewajibkan login; bagian "MIGRASI" di bawah melonggarkannya).
 
 -- 1. TABEL ------------------------------------------------------------------
 
 create table if not exists public.inspections (
   id             uuid primary key default gen_random_uuid(),
-  user_id        uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  user_id        uuid,                                -- tidak dipakai lagi (tanpa login); dibiarkan agar data lama aman
   inspector      text not null default '',
   location       text not null default '',
-  image_path     text not null,                       -- path di Storage: <user_id>/<uuid>.jpg
+  image_path     text not null,                       -- path di Storage: riwayat/<uuid>.jpg
   image_width    int,
   image_height   int,
   model_version  text,
@@ -21,7 +22,7 @@ create table if not exists public.inspections (
 create table if not exists public.detections (
   id             bigint generated always as identity primary key,
   inspection_id  uuid not null references public.inspections(id) on delete cascade,
-  user_id        uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  user_id        uuid,
   predicted_class text not null,                      -- keluaran model
   final_class     text,                               -- kelas setelah diperiksa manusia (null jika ditolak)
   status          text not null default 'auto' check (status in ('auto','corrected','rejected')),
@@ -31,37 +32,51 @@ create table if not exists public.detections (
   created_at      timestamptz not null default now()
 );
 
-create index if not exists inspections_user_created_idx on public.inspections (user_id, created_at desc);
-create index if not exists detections_inspection_idx    on public.detections (inspection_id);
-create index if not exists detections_status_idx        on public.detections (user_id, status);
+-- MIGRASI dari versi lama (yang mewajibkan login): lepas kewajiban user_id & relasinya ke auth.users.
+alter table public.inspections alter column user_id drop not null;
+alter table public.inspections alter column user_id drop default;
+alter table public.inspections drop constraint if exists inspections_user_id_fkey;
+alter table public.detections  alter column user_id drop not null;
+alter table public.detections  alter column user_id drop default;
+alter table public.detections  drop constraint if exists detections_user_id_fkey;
+
+create index if not exists inspections_created_idx   on public.inspections (created_at desc);
+create index if not exists detections_inspection_idx on public.detections (inspection_id);
+create index if not exists detections_status_idx     on public.detections (status);
 
 -- 2. ROW LEVEL SECURITY -----------------------------------------------------
--- Tiap pengguna hanya melihat dan mengubah datanya sendiri.
+-- Tanpa login: role "anon" (kunci publishable di frontend) boleh membaca, menambah, dan menghapus riwayat.
+-- Catatan: siapa pun yang punya URL aplikasi bisa melihat/menghapus riwayat. Cocok untuk satu tim/kebun.
+-- Jika nanti butuh pembatasan per pengguna, aktifkan kembali login dan kebijakan berbasis auth.uid().
 
 alter table public.inspections enable row level security;
 alter table public.detections  enable row level security;
 
-drop policy if exists "inspections_select_own" on public.inspections;
-drop policy if exists "inspections_insert_own" on public.inspections;
-drop policy if exists "inspections_update_own" on public.inspections;
-drop policy if exists "inspections_delete_own" on public.inspections;
-create policy "inspections_select_own" on public.inspections for select to authenticated using (user_id = auth.uid());
-create policy "inspections_insert_own" on public.inspections for insert to authenticated with check (user_id = auth.uid());
-create policy "inspections_update_own" on public.inspections for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy "inspections_delete_own" on public.inspections for delete to authenticated using (user_id = auth.uid());
+-- bersihkan kebijakan lama (versi login) dan versi ini
+do $$
+declare p record;
+begin
+  for p in
+    select policyname, tablename from pg_policies
+    where schemaname = 'public' and tablename in ('inspections', 'detections')
+  loop
+    execute format('drop policy if exists %I on public.%I', p.policyname, p.tablename);
+  end loop;
+end $$;
 
-drop policy if exists "detections_select_own" on public.detections;
-drop policy if exists "detections_insert_own" on public.detections;
-drop policy if exists "detections_update_own" on public.detections;
-drop policy if exists "detections_delete_own" on public.detections;
-create policy "detections_select_own" on public.detections for select to authenticated using (user_id = auth.uid());
-create policy "detections_insert_own" on public.detections for insert to authenticated
-  with check (
-    user_id = auth.uid()
-    and exists (select 1 from public.inspections i where i.id = inspection_id and i.user_id = auth.uid())
-  );
-create policy "detections_update_own" on public.detections for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy "detections_delete_own" on public.detections for delete to authenticated using (user_id = auth.uid());
+create policy "inspections_select_all" on public.inspections for select to anon, authenticated using (true);
+create policy "inspections_insert_all" on public.inspections for insert to anon, authenticated with check (true);
+create policy "inspections_delete_all" on public.inspections for delete to anon, authenticated using (true);
+
+create policy "detections_select_all" on public.detections for select to anon, authenticated using (true);
+create policy "detections_insert_all" on public.detections for insert to anon, authenticated with check (true);
+create policy "detections_delete_all" on public.detections for delete to anon, authenticated using (true);
+
+-- Izin tingkat tabel (RLS di atas yang membatasi baris)
+grant usage on schema public to anon, authenticated;
+grant select, insert, delete on public.inspections to anon, authenticated;
+grant select, insert, delete on public.detections  to anon, authenticated;
+grant usage, select on all sequences in schema public to anon, authenticated;
 
 -- 3. RINGKASAN KOREKSI (berguna untuk mengukur akurasi di lapangan) ----------
 
@@ -77,9 +92,11 @@ select
 from public.detections
 group by predicted_class;
 
+grant select on public.model_feedback_summary to anon, authenticated;
+
 -- 4. STORAGE ----------------------------------------------------------------
--- Bucket publik-baca (URL gambar bisa ditampilkan langsung); hanya pemilik yang boleh upload/hapus
--- ke folder bernama user_id miliknya. Hanya JPEG, maks 5 MB.
+-- Bucket publik-baca (URL gambar bisa ditampilkan langsung). Hanya JPEG, maks 5 MB.
+-- Upload/hapus dibuka untuk anon, tetapi hanya ke bucket "inspections".
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('inspections', 'inspections', true, 5242880, array['image/jpeg'])
@@ -90,7 +107,9 @@ on conflict (id) do update
 
 drop policy if exists "inspections_upload_own_folder" on storage.objects;
 drop policy if exists "inspections_delete_own_folder" on storage.objects;
-create policy "inspections_upload_own_folder" on storage.objects for insert to authenticated
-  with check (bucket_id = 'inspections' and (storage.foldername(name))[1] = auth.uid()::text);
-create policy "inspections_delete_own_folder" on storage.objects for delete to authenticated
-  using (bucket_id = 'inspections' and (storage.foldername(name))[1] = auth.uid()::text);
+drop policy if exists "inspections_upload_public"     on storage.objects;
+drop policy if exists "inspections_delete_public"     on storage.objects;
+create policy "inspections_upload_public" on storage.objects for insert to anon, authenticated
+  with check (bucket_id = 'inspections');
+create policy "inspections_delete_public" on storage.objects for delete to anon, authenticated
+  using (bucket_id = 'inspections');

@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="preload" href="model/best.onnx" as="fetch" crossorigin>
   <script defer src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.58.0/dist/umd/supabase.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js"></script>
 </head>
 <body>
@@ -21,10 +21,6 @@
       <a href="#history">Riwayat</a>
       <a href="#model">Tentang model</a>
     </nav>
-    <div class="side-user">
-      <p id="userLabel" class="muted-light">Belum masuk</p>
-      <button id="authBtn" class="btn-ghost">Masuk / Daftar</button>
-    </div>
   </aside>
 
   <main class="main">
@@ -90,7 +86,7 @@
       <div class="table-wrap">
         <table>
           <thead><tr><th>Foto</th><th>Pemeriksa</th><th>Lokasi</th><th>Tandan</th><th>Komposisi</th><th>Waktu</th><th></th></tr></thead>
-          <tbody id="historyBody"><tr><td colspan="7">Masuk untuk melihat riwayat.</td></tr></tbody>
+          <tbody id="historyBody"><tr><td colspan="7">Memuat riwayat…</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -101,21 +97,6 @@
     </section>
     <footer>PalmVision AI · YOLO26 · ONNX Runtime Web · Supabase</footer>
   </main>
-
-  <dialog id="authDialog">
-    <form id="authForm" method="dialog">
-      <h3>Masuk ke PalmVision</h3>
-      <label>Email<input id="authEmail" type="email" autocomplete="email" required></label>
-      <label>Kata sandi<input id="authPass" type="password" autocomplete="current-password" minlength="6" required></label>
-      <p id="authMsg" class="message"></p>
-      <p class="auth-hint">Akun baru perlu konfirmasi email. Jika email tidak datang, cek folder Spam atau hubungi pengelola aplikasi.</p>
-      <div class="dialog-actions">
-        <button type="button" id="signInBtn">Masuk</button>
-        <button type="button" id="signUpBtn" class="btn-ghost-dark">Daftar</button>
-        <button type="button" id="closeAuth" class="btn-ghost-dark">Tutup</button>
-      </div>
-    </form>
-  </dialog>
 
   <button id="camFab" class="cam-fab" type="button" aria-label="Buka kamera real-time" title="Kamera real-time"
     onclick="var b=document.getElementById('cameraBtn'); if(b.disabled){document.getElementById('message').textContent='Model masih dimuat, coba lagi sebentar.'} else {b.click()}">
@@ -148,7 +129,7 @@
     </div>
   </dialog>
 
-  <script defer src="config.js"></script>
-  <script type="module" src="app.js"></script>
+  <script defer src="config.js?v=3"></script>
+  <script type="module" src="app.js?v=3"></script>
 </body>
 </html>
