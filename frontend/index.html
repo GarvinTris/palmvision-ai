@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PalmVision AI</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">PalmVision <span>AI</span></div>
+    <p class="side-caption">KEMATANGAN TBS SAWIT</p>
+    <a class="active" href="#overview">Ringkasan</a>
+    <a href="#inspection">Deteksi</a>
+    <a href="#history">Riwayat</a>
+    <a href="#model">Tentang model</a>
+    <div class="side-user">
+      <p id="userLabel" class="muted-light">Belum masuk</p>
+      <button id="authBtn" class="btn-ghost">Masuk / Daftar</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div><p class="eyebrow">AGRICULTURE INTELLIGENCE</p><h1>Dashboard Kematangan Sawit</h1></div>
+      <div id="modelStatus" class="status">Memuat model…</div>
+    </header>
+
+    <div id="configBanner" class="banner hidden">
+      Supabase belum dikonfigurasi. Isi <code>frontend/config.js</code>. Deteksi tetap bisa dicoba, tetapi hasil tidak bisa disimpan.
+    </div>
+
+    <section id="overview" class="stats">
+      <article class="stat-card"><p>Total pemeriksaan</p><strong id="totalChecks">–</strong></article>
+      <article class="stat-card"><p>Total tandan tercatat</p><strong id="totalBunches">–</strong></article>
+      <article class="stat-card"><p>Tandan matang</p><strong id="ripeShare">–</strong></article>
+      <article class="stat-card"><p>Deteksi diterima tanpa koreksi</p><strong id="acceptRate">–</strong><small id="acceptNote" class="muted"></small></article>
+    </section>
+
+    <section id="inspection" class="panel">
+      <div class="section-heading">
+        <div><p class="eyebrow">PEMERIKSAAN BARU</p><h2>Deteksi kematangan tandan</h2></div>
+        <p class="muted">Model berjalan di perangkatmu; foto baru dikirim ke server saat kamu menekan Simpan.</p>
+      </div>
+      <div class="form-grid">
+        <label>Nama pemeriksa<input id="inspector" placeholder="Contoh: Garvin" maxlength="80"></label>
+        <label>Lokasi kebun<input id="location" placeholder="Contoh: Blok A, Medan" maxlength="120"></label>
+      </div>
+      <label class="upload-area" for="imageInput">
+        <span class="upload-icon">↑</span>
+        <strong>Pilih atau ambil foto pohon sawit</strong>
+        <span class="muted">JPG, PNG, WEBP</span>
+        <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp">
+        <span id="fileName" class="file-name">Belum ada file dipilih</span>
+      </label>
+      <button id="detectBtn" type="button" disabled>Mulai analisis</button>
+      <p id="message" class="message" role="status"></p>
+
+      <div id="result" class="result hidden">
+        <div class="result-head"><h3>Hasil deteksi</h3><span id="totalPill" class="count-pill">0 tandan</span></div>
+        <div id="countChips" class="chips"></div>
+        <div class="canvas-wrap"><canvas id="resultCanvas"></canvas></div>
+        <p class="muted small">Kotak putus-putus = model kurang yakin, mohon dicek. Ubah kelas atau tolak deteksi yang salah sebelum menyimpan; koreksimu dipakai untuk mengukur dan memperbaiki model.</p>
+        <div id="detectionList" class="detection-list"></div>
+        <button id="saveBtn" type="button">Simpan ke riwayat</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-heading"><div><p class="eyebrow">ANALITIK</p><h2>Komposisi kematangan per pemeriksaan</h2></div></div>
+      <canvas id="historyChart" height="110"></canvas>
+    </section>
+
+    <section id="history" class="panel">
+      <div class="section-heading"><div><p class="eyebrow">RECORDS</p><h2>Riwayat pemeriksaan</h2></div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Foto</th><th>Pemeriksa</th><th>Lokasi</th><th>Tandan</th><th>Komposisi</th><th>Waktu</th><th></th></tr></thead>
+          <tbody id="historyBody"><tr><td colspan="7">Masuk untuk melihat riwayat.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="model" class="panel">
+      <div class="section-heading"><div><p class="eyebrow">TRANSPARANSI</p><h2>Tentang model</h2></div></div>
+      <div id="modelInfo" class="muted">Memuat…</div>
+    </section>
+    <footer>PalmVision AI · YOLO26 · ONNX Runtime Web · Supabase</footer>
+  </main>
+
+  <dialog id="authDialog">
+    <form id="authForm" method="dialog">
+      <h3>Masuk ke PalmVision</h3>
+      <label>Email<input id="authEmail" type="email" autocomplete="email" required></label>
+      <label>Kata sandi<input id="authPass" type="password" autocomplete="current-password" minlength="6" required></label>
+      <p id="authMsg" class="message"></p>
+      <div class="dialog-actions">
+        <button type="button" id="signInBtn">Masuk</button>
+        <button type="button" id="signUpBtn" class="btn-ghost-dark">Daftar</button>
+        <button type="button" id="closeAuth" class="btn-ghost-dark">Tutup</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="config.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

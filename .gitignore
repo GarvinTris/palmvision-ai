@@ -1,0 +1,9 @@
+.env
+*.db
+.venv/
+.venv311/
+__pycache__/
+node_modules/
+.vercel/
+# bobot mentah PyTorch tidak perlu di repo; yang dipakai web adalah frontend/model/best.onnx
+*.pt

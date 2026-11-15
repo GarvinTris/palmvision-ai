@@ -1,0 +1,54 @@
+{
+  "version": "palm3_preview_yolo26n_640-2026-11-15",
+  "imgsz": 640,
+  "preset": "preview",
+  "review_margin": 0.15,
+  "classes": [
+    {
+      "id": 0,
+      "name": "mentah",
+      "color": "#2e9e5b",
+      "conf": 0.24
+    },
+    {
+      "id": 1,
+      "name": "menjelang_matang",
+      "color": "#e0a100",
+      "conf": 0.12
+    },
+    {
+      "id": 2,
+      "name": "matang",
+      "color": "#d6342c",
+      "conf": 0.32
+    }
+  ],
+  "dataset": "SawitMVC (ULM-DS-Lab), CC BY-NC 4.0 - hanya untuk penggunaan non-komersial",
+  "class_map": "B1->matang, B2->menjelang_matang, B3+B4->mentah. Tidak ada kelas terlalu_matang.",
+  "metrics_test": {
+    "mentah": {
+      "precision": 0.6429,
+      "recall": 0.677,
+      "mAP50": 0.6789,
+      "mAP50-95": 0.2738
+    },
+    "menjelang_matang": {
+      "precision": 0.4594,
+      "recall": 0.4234,
+      "mAP50": 0.4112,
+      "mAP50-95": 0.1866
+    },
+    "matang": {
+      "precision": 0.5915,
+      "recall": 0.7381,
+      "mAP50": 0.6645,
+      "mAP50-95": 0.3407
+    },
+    "SEMUA": {
+      "precision": 0.5646,
+      "recall": 0.6128,
+      "mAP50": 0.5848,
+      "mAP50-95": 0.267
+    }
+  }
+}
