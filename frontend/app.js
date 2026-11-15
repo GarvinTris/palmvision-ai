@@ -137,7 +137,8 @@ function drawResult() {
   const { bmp, dets } = current;
   const cv = $('resultCanvas'); cv.width = bmp.width; cv.height = bmp.height;
   const ctx = cv.getContext('2d'); ctx.drawImage(bmp, 0, 0);
-  const lw = Math.max(2, bmp.width / 350), fs = Math.max(13, bmp.width / 55);
+  const disp = Math.min(1, (cv.clientWidth || bmp.width) / bmp.width);      // skala tampil di layar
+  const lw = Math.max(2, 2.5 / disp), fs = Math.max(12 / disp, bmp.width / 70);
   ctx.font = `600 ${fs}px sans-serif`; ctx.textBaseline = 'top';
   for (const d of dets) {
     if (d.rejected) continue;
@@ -181,12 +182,67 @@ function renderResult() {
   drawResult();
 }
 
+/* ------------------------------ INFO KATEGORI (sidebar kamera) ------------------------------ */
+
+// Panduan umum per kategori. Bukan hasil pengukuran; kriteria panen tiap kebun bisa berbeda.
+const CLASS_INFO = {
+  mentah:           { ciri: 'Buah kecil, hitam atau hijau gelap, belum ada rona merah.', saran: 'Belum waktunya dipanen. Biarkan menua dan periksa lagi nanti.' },
+  menjelang_matang: { ciri: 'Warna hitam dengan transisi merah mulai tampak.', saran: 'Mendekati matang. Jadwalkan pemeriksaan ulang secara berkala.' },
+  matang:           { ciri: 'Warna merah dominan, buah besar dan bulat.', saran: 'Kandidat panen. Verifikasi manual (warna, brondolan) sebelum dipanen.' },
+  terlalu_matang:   { ciri: 'Warna kusam atau pudar dan banyak brondolan (buah lepas).', saran: 'Segera panen dan olah; keterlambatan dapat menurunkan kualitas minyak.' },
+};
+const infoBlock = name => CLASS_INFO[name]
+  ? `<p><b>Ciri:</b> ${esc(CLASS_INFO[name].ciri)}</p><p><b>Saran:</b> ${esc(CLASS_INFO[name].saran)}</p>` : '';
+
+function renderCamGuide() {
+  if (!meta) return;
+  $('camGuide').innerHTML = [...meta.classes].reverse().map(c =>
+    `<div class="cam-card" style="--c:${esc(c.color)}"><div class="cam-card-head"><strong>${esc(prettyName(c.name))}</strong></div>${infoBlock(c.name)}</div>`).join('');
+}
+
+function camAdviceText(counts, review) {
+  const n = k => counts[k] || 0, total = Object.values(counts).reduce((s, v) => s + v, 0);
+  if (!total) return 'Belum ada tandan terdeteksi. Dekatkan kamera, pastikan cahaya cukup dan tandan tidak tertutup pelepah.';
+  let t;
+  if (n('terlalu_matang')) t = `${n('terlalu_matang')} tandan terlalu matang terdeteksi. Pertimbangkan segera dipanen setelah verifikasi manual.`;
+  else if (n('matang')) t = `${n('matang')} tandan matang terdeteksi. Kandidat panen, verifikasi manual dulu.`;
+  else if (n('menjelang_matang')) t = `Belum ada yang matang. ${n('menjelang_matang')} tandan menjelang matang, periksa lagi nanti.`;
+  else t = 'Semua tandan yang terdeteksi masih mentah. Belum waktunya panen.';
+  return review ? `${t} (${review} deteksi perlu dicek.)` : t;
+}
+
+let camSideAt = 0;
+function updateCamSide(dets, force = false) {
+  const now = performance.now();
+  if (!force && now - camSideAt < 350) return;      // batasi pembaruan DOM ~3x/detik
+  camSideAt = now;
+  const counts = {}, sums = {};
+  dets.forEach(d => { counts[d.className] = (counts[d.className] || 0) + 1; sums[d.className] = (sums[d.className] || 0) + d.score; });
+  $('camTotal').textContent = `${dets.length} tandan`;
+  $('camAdvice').textContent = camAdviceText(counts, dets.filter(d => d.needsReview).length);
+  $('camCards').innerHTML = [...meta.classes].reverse().filter(c => counts[c.name]).map(c => {
+    const avg = Math.round(100 * sums[c.name] / counts[c.name]);
+    return `<div class="cam-card" style="--c:${esc(c.color)}"><div class="cam-card-head"><strong>${esc(prettyName(c.name))}</strong><span class="cam-count">${counts[c.name]}</span></div><p class="muted small">Keyakinan rata-rata ${avg}%</p>${infoBlock(c.name)}</div>`;
+  }).join('');
+  const rows = [...dets].sort((a, b) => b.score - a.score).slice(0, 12);
+  $('camList').innerHTML = rows.length
+    ? rows.map(d => `<div class="cam-row" style="--c:${esc(classColor(d.className))}"><i></i><span>${esc(prettyName(d.className))}</span><span class="bar"><b style="width:${Math.round(d.score * 100)}%"></b></span><span>${Math.round(d.score * 100)}%${d.needsReview ? ' <em>cek</em>' : ''}</span></div>`).join('')
+    : '<span class="muted small">Belum ada deteksi.</span>';
+}
+
 /* ------------------------------ KAMERA LIVE ------------------------------ */
 
 let camStream = null, camActive = false, camFacing = 'environment';
 
 function stopStream() { camStream?.getTracks().forEach(t => t.stop()); camStream = null; }
-function stopCamera() { camActive = false; stopStream(); $('camVideo').srcObject = null; }
+function stopCamera() {
+  camActive = false; stopStream(); $('camVideo').srcObject = null;
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+function tryFullscreen() {
+  const d = $('cameraDialog');
+  try { if (d.requestFullscreen && !document.fullscreenElement) d.requestFullscreen().catch(() => {}); } catch { /* opsional */ }
+}
 
 async function startCamera() {
   if (!session) return setMsg('Model belum siap.', true);
@@ -200,14 +256,24 @@ async function startCamera() {
     return setMsg(e.name === 'NotAllowedError' ? 'Izin kamera ditolak. Izinkan kamera di pengaturan browser.' : `Kamera gagal: ${e.message}`, true);
   }
   const v = $('camVideo'); v.srcObject = camStream; await v.play().catch(() => {});
-  if (!$('cameraDialog').open) $('cameraDialog').showModal();
+  if (!$('cameraDialog').open) { $('cameraDialog').showModal(); renderCamGuide(); updateCamSide([], true); tryFullscreen(); }
   if (!camActive) { camActive = true; camLoop(); }
 }
 
+function fitOverlay(v, ov) {
+  const W = v.clientWidth, H = v.clientHeight, vw = v.videoWidth, vh = v.videoHeight;
+  if (!W || !H || !vw) return;
+  const s = Math.min(W / vw, H / vh), w = vw * s, h = vh * s;
+  ov.style.width = `${w}px`; ov.style.height = `${h}px`;
+  ov.style.left = `${(W - w) / 2}px`; ov.style.top = `${(H - h) / 2}px`;
+}
+
 function drawLive(ov, v, dets) {
+  fitOverlay(v, ov);
   ov.width = v.videoWidth; ov.height = v.videoHeight;
   const ctx = ov.getContext('2d'); ctx.clearRect(0, 0, ov.width, ov.height);
-  const lw = Math.max(2, ov.width / 300), fs = Math.max(13, ov.width / 45);
+  const disp = (parseFloat(ov.style.width) || ov.width) / ov.width;          // skala tampil di layar
+  const lw = Math.max(2, 2.5 / disp), fs = Math.max(12 / disp, ov.width / 60);
   ctx.font = `600 ${fs}px sans-serif`; ctx.textBaseline = 'top';
   for (const d of dets) {
     const x = d.x1 * ov.width, y = d.y1 * ov.height, w = (d.x2 - d.x1) * ov.width, h = (d.y2 - d.y1) * ov.height;
@@ -228,10 +294,9 @@ async function camLoop() {
         const dets = await inferSource(v, v.videoWidth, v.videoHeight);
         if (!camActive) break;
         drawLive(ov, v, dets);
+        updateCamSide(dets);
         const now = performance.now(); fps = fps ? 0.8 * fps + 0.2 * (1000 / (now - last)) : 1000 / (now - last); last = now;
-        const counts = {}; dets.forEach(d => counts[d.className] = (counts[d.className] || 0) + 1);
-        const txt = Object.entries(counts).map(([k, n]) => `${prettyName(k)}: ${n}`).join(' · ') || 'Tidak ada tandan terdeteksi';
-        $('camInfo').textContent = `${txt}  ·  ${fps.toFixed(1)} fps`;
+        $('camInfo').textContent = `Live · ${fps.toFixed(1)} fps`;
       } catch (e) { console.error(e); $('camInfo').textContent = `Deteksi gagal: ${e.message}`; camActive = false; break; }
     }
     await new Promise(r => requestAnimationFrame(r));
@@ -270,7 +335,7 @@ async function saveInspection() {
     const g = await sb.auth.signInAnonymously();
     if (g.error || !g.data?.user) {
       console.error(g.error);
-      setMsg('Mode tamu belum aktif di Supabase. Masuk dengan akun untuk menyimpan.', true);
+      setMsg('Mode tamu belum diaktifkan di Supabase (Anonymous sign-ins). Masuk dengan akun untuk menyimpan.', true);
       openAuth(); return;
     }
     user = g.data.user;
@@ -390,14 +455,26 @@ async function loadFeedback() {
 function setMsg(t, err = false) { const m = $('message'); m.textContent = t; m.classList.toggle('error', err); }
 function openAuth() { if (!sb) return setMsg('Supabase belum dikonfigurasi (config.js).', true); $('authMsg').textContent = ''; $('authDialog').showModal(); }
 
+function authErrorText(e) {
+  const m = String(e?.message || e);
+  if (/not confirmed/i.test(m)) return 'Email belum dikonfirmasi. Konfirmasi lewat email, atau minta pengelola mengonfirmasi akunmu.';
+  if (/invalid login credentials/i.test(m)) return 'Email atau kata sandi salah (atau akun belum dikonfirmasi).';
+  if (/rate limit/i.test(m)) return 'Terlalu banyak email terkirim. Tunggu beberapa saat lalu coba lagi.';
+  if (/not authorized/i.test(m)) return 'Email ini belum diizinkan oleh layanan email bawaan Supabase. Minta pengelola mengonfirmasi akun secara manual.';
+  return m;
+}
+
 async function authAction(kind) {
   const email = $('authEmail').value.trim(), password = $('authPass').value, m = $('authMsg');
   m.classList.remove('error'); m.textContent = 'Memproses…';
   const { data, error } = kind === 'in'
     ? await sb.auth.signInWithPassword({ email, password })
     : await sb.auth.signUp({ email, password });
-  if (error) { m.classList.add('error'); m.textContent = error.message; return; }
-  if (kind === 'up' && !data.session) { m.textContent = 'Akun dibuat. Cek email untuk konfirmasi, lalu masuk.'; return; }
+  if (error) { m.classList.add('error'); m.textContent = authErrorText(error); return; }
+  if (kind === 'up' && !data.session) {
+    m.textContent = 'Akun dibuat, tetapi harus dikonfirmasi lewat email. Cek Inbox dan Spam. Email bisa tidak sampai bila layanan email Supabase belum diatur; hubungi pengelola untuk konfirmasi manual.';
+    return;
+  }
   $('authDialog').close();
 }
 

@@ -2,20 +2,9 @@
 <html lang="id">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>PalmVision AI</title>
   <link rel="stylesheet" href="style.css">
-  <style>
-    .mode-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:20px 0 14px}
-    .mode-card{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:8px;min-height:150px;padding:22px;border:1.5px dashed #b9c9bc;border-radius:12px;background:#fbfdfb;color:var(--ink);cursor:pointer;font:inherit;font-size:13px;font-weight:500}
-    .mode-card strong{font-size:15px}
-    .mode-card:hover{border-color:var(--green);background:var(--green2)}
-    .mode-icon{color:var(--green);display:inline-flex}
-    .mode-camera{border-style:solid}
-    .visually-hidden{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;pointer-events:none}
-    .cam-fab{position:fixed;right:20px;bottom:20px;width:56px;height:56px;border-radius:50%;padding:0;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:50}
-    @media(max-width:700px){.mode-grid{grid-template-columns:1fr}}
-  </style>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="preload" href="model/best.onnx" as="fetch" crossorigin>
   <script defer src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
@@ -26,10 +15,12 @@
   <aside class="sidebar">
     <div class="brand">PalmVision <span>AI</span></div>
     <p class="side-caption">KEMATANGAN TBS SAWIT</p>
-    <a class="active" href="#overview">Ringkasan</a>
-    <a href="#inspection">Deteksi</a>
-    <a href="#history">Riwayat</a>
-    <a href="#model">Tentang model</a>
+    <nav class="nav">
+      <a class="active" href="#overview">Ringkasan</a>
+      <a href="#inspection">Deteksi</a>
+      <a href="#history">Riwayat</a>
+      <a href="#model">Tentang model</a>
+    </nav>
     <div class="side-user">
       <p id="userLabel" class="muted-light">Belum masuk</p>
       <button id="authBtn" class="btn-ghost">Masuk / Daftar</button>
@@ -73,7 +64,7 @@
         <button id="cameraBtn" type="button" class="mode-card mode-camera" disabled>
           <span class="mode-icon"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></span>
           <strong>2. Kamera real-time</strong>
-          <span>Arahkan kamera ke pohon, deteksi muncul langsung di layar</span>
+          <span class="muted">Arahkan kamera ke pohon, deteksi muncul langsung di layar</span>
         </button>
       </div>
       <div class="btn-row"><button id="detectBtn" type="button" class="btn-ghost-dark" disabled>Analisis ulang gambar</button></div>
@@ -117,6 +108,7 @@
       <label>Email<input id="authEmail" type="email" autocomplete="email" required></label>
       <label>Kata sandi<input id="authPass" type="password" autocomplete="current-password" minlength="6" required></label>
       <p id="authMsg" class="message"></p>
+      <p class="auth-hint">Akun baru perlu konfirmasi email. Jika email tidak datang, cek folder Spam atau hubungi pengelola aplikasi.</p>
       <div class="dialog-actions">
         <button type="button" id="signInBtn">Masuk</button>
         <button type="button" id="signUpBtn" class="btn-ghost-dark">Daftar</button>
@@ -130,18 +122,30 @@
     <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
   </button>
 
-  <dialog id="cameraDialog" class="cam-dialog">
-    <div class="cam-wrap">
-      <video id="camVideo" playsinline muted autoplay></video>
-      <canvas id="camOverlay"></canvas>
+  <dialog id="cameraDialog" class="cam-dialog" aria-label="Kamera real-time">
+    <div class="cam-layout">
+      <section class="cam-stage">
+        <div class="cam-wrap">
+          <video id="camVideo" playsinline muted autoplay></video>
+          <canvas id="camOverlay"></canvas>
+        </div>
+        <button id="camClose" type="button" class="cam-exit" aria-label="Keluar dari kamera">✕ Keluar</button>
+        <p id="camInfo" class="cam-info">Memulai kamera…</p>
+        <div class="cam-toolbar">
+          <button id="camShot" type="button">Ambil foto &amp; periksa</button>
+          <button id="camSwitch" type="button" class="btn-glass">Ganti kamera</button>
+        </div>
+      </section>
+      <aside class="cam-side" aria-live="polite">
+        <div class="cam-side-head"><h3>Informasi objek</h3><span id="camTotal" class="count-pill">0 tandan</span></div>
+        <p id="camAdvice" class="cam-advice">Arahkan kamera ke tandan sawit.</p>
+        <div id="camCards" class="cam-cards"></div>
+        <h4>Daftar deteksi</h4>
+        <div id="camList" class="cam-list"></div>
+        <details class="cam-guide"><summary>Panduan kategori</summary><div id="camGuide"></div></details>
+        <p class="muted small">Panduan umum, bukan hasil pengukuran. Kriteria panen tiap kebun bisa berbeda, selalu verifikasi manual.</p>
+      </aside>
     </div>
-    <p id="camInfo" class="cam-info">Memulai kamera…</p>
-    <div class="dialog-actions">
-      <button type="button" id="camShot">Ambil foto &amp; periksa</button>
-      <button type="button" id="camSwitch" class="btn-ghost-dark">Ganti kamera</button>
-      <button type="button" id="camClose" class="btn-ghost-dark">Tutup</button>
-    </div>
-    <p class="muted small">Deteksi live berjalan di perangkatmu; kecepatannya bergantung pada HP/laptop. Untuk hasil terbaik, ambil foto lalu periksa.</p>
   </dialog>
 
   <script defer src="config.js"></script>
